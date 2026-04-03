@@ -15,6 +15,7 @@ class ReceiptExtraction(BaseModel):
     receipt_number: str | None = Field(default=None, description="憑證編號")
     receipt_date: str | None = Field(default=None, description="YYYY-MM-DD")
     merchant_name: str | None = Field(default=None, description="店家")
+    total_amount: Decimal | None = Field(default=None, description="總計")
     currency: str = Field(default="KRW", description="幣別")
     items: list[ReceiptItem] = Field(default_factory=list, description="明細列表")
     raw_text: str | None = Field(default=None, description="OCR 原始文字")

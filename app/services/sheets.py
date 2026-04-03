@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,6 +22,7 @@ EXPENSE_HEADERS = [
     "數量",
     "單價",
     "複價",
+    "總計",
     "幣別",
 ]
 
@@ -28,20 +32,40 @@ MAPPING_HEADERS = ["登錄者ID", "登錄者"]
 class GoogleSheetsService:
     def __init__(self) -> None:
         spreadsheet_id = os.getenv("GOOGLE_SHEET_ID")
-        creds_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         if not spreadsheet_id:
             raise ValueError("GOOGLE_SHEET_ID 尚未設定")
-        if not creds_path:
-            raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 尚未設定")
 
-        credentials = Credentials.from_service_account_file(
-            creds_path,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
+        try:
+            self.local_tz = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Taipei"))
+        except ZoneInfoNotFoundError:
+            self.local_tz = ZoneInfo("UTC")
+
+        credentials = self._load_credentials()
         gc = gspread.authorize(credentials)
         self.sheet = gc.open_by_key(spreadsheet_id)
         self.expenses_ws = self._ensure_worksheet("expenses", EXPENSE_HEADERS)
         self.mapping_ws = self._ensure_worksheet("user_mapping", MAPPING_HEADERS)
+
+    @staticmethod
+    def _load_credentials() -> Credentials:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+        raw_content = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT", "").strip()
+        if raw_content:
+            return Credentials.from_service_account_info(json.loads(raw_content), scopes=scopes)
+
+        raw_value = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        if not raw_value:
+            raise ValueError("請先設定 GOOGLE_SERVICE_ACCOUNT_JSON 或 GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
+
+        candidate_path = Path(raw_value)
+        if candidate_path.exists():
+            return Credentials.from_service_account_file(str(candidate_path), scopes=scopes)
+
+        if raw_value.startswith("{"):
+            return Credentials.from_service_account_info(json.loads(raw_value), scopes=scopes)
+
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是檔案路徑或 JSON 內容")
 
     def _ensure_worksheet(self, title: str, headers: list[str]):
         try:
@@ -70,7 +94,7 @@ class GoogleSheetsService:
         self.mapping_ws.append_row([user_id, display_name])
 
     def append_receipt(self, user_id: str, registrant: str, receipt: ReceiptExtraction) -> int:
-        register_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        register_date = datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         if not receipt.items:
             rows.append(
@@ -85,6 +109,7 @@ class GoogleSheetsService:
                     "",
                     "",
                     "",
+                    "" if receipt.total_amount is None else str(receipt.total_amount),
                     receipt.currency,
                 ]
             )
@@ -102,6 +127,7 @@ class GoogleSheetsService:
                         str(item.quantity),
                         str(item.unit_price),
                         str(item.line_total),
+                        "" if receipt.total_amount is None else str(receipt.total_amount),
                         receipt.currency,
                     ]
                 )

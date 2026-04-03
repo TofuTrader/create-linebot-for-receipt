@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: create-linebot-for-receipt
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: APP_TIMEZONE
+        value: Asia/Taipei
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        value: /etc/secrets/google-service-account.json
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT
+        sync: false

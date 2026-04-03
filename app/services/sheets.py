@@ -74,6 +74,7 @@ class GoogleSheetsService:
         self.mapping_ws = self._ensure_worksheet("user_mapping", MAPPING_HEADERS)
         self.events_ws = self._ensure_worksheet("processed_events", EVENT_HEADERS)
         self.analysis_ws = self._ensure_worksheet("category_analysis", ANALYSIS_HEADERS)
+        self._apply_static_formats()
 
     @staticmethod
     def _load_credentials() -> Credentials:
@@ -122,6 +123,13 @@ class GoogleSheetsService:
         if row1 != headers:
             ws.update("A1", [headers])
         return ws
+
+    def _apply_static_formats(self) -> None:
+        twd_col = self._column_letter(EXPENSE_HEADERS.index("複價(台幣)") + 1)
+        self.expenses_ws.format(
+            f"{twd_col}2:{twd_col}",
+            {"numberFormat": {"type": "CURRENCY", "pattern": '"NT$"#,##0'}},
+        )
 
     def get_display_name(self, user_id: str) -> str:
         records = self.mapping_ws.get_all_records()
@@ -234,8 +242,9 @@ class GoogleSheetsService:
         )
         receipt_category = (receipt.transaction_category or "其他").strip() or "其他"
         tax_refund_status = self._format_tax_refund_status(receipt.tax_refund_status)
-        tax_refund_amount = "" if receipt.tax_refund_amount is None else str(receipt.tax_refund_amount)
+        tax_refund_amount = self._format_source_amount(receipt.tax_refund_amount, receipt.currency)
         tax_refund_note = receipt.tax_refund_note or ""
+        total_amount_display = self._format_source_amount(receipt.total_amount, receipt.currency)
         rows = []
         if not receipt.items:
             line_total_twd = self._convert_amount_to_twd(receipt.total_amount, receipt.currency)
@@ -253,7 +262,7 @@ class GoogleSheetsService:
                     "",
                     "",
                     "" if line_total_twd is None else self._format_decimal(line_total_twd),
-                    "" if receipt.total_amount is None else str(receipt.total_amount),
+                    total_amount_display,
                     receipt.currency,
                     tax_refund_status,
                     tax_refund_amount,
@@ -271,6 +280,8 @@ class GoogleSheetsService:
                 )
                 item_category = (item.transaction_category or receipt_category).strip() or "其他"
                 line_total_twd = self._convert_amount_to_twd(item.line_total, receipt.currency)
+                unit_price_display = self._format_source_amount(item.unit_price, receipt.currency)
+                line_total_display = self._format_source_amount(item.line_total, receipt.currency)
                 rows.append(
                     [
                         register_date,
@@ -282,10 +293,10 @@ class GoogleSheetsService:
                         item_display,
                         item_category,
                         str(item.quantity),
-                        str(item.unit_price),
-                        str(item.line_total),
+                        unit_price_display,
+                        line_total_display,
                         "" if line_total_twd is None else self._format_decimal(line_total_twd),
-                        "" if receipt.total_amount is None else str(receipt.total_amount),
+                        total_amount_display,
                         receipt.currency,
                         tax_refund_status,
                         tax_refund_amount,
@@ -413,11 +424,44 @@ class GoogleSheetsService:
         rate = self.fx_rates.get((currency or "").strip().upper())
         if rate is None:
             return None
-        return (amount_decimal * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return (amount_decimal * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
     @staticmethod
     def _format_decimal(value: Decimal) -> str:
         return format(value, "f")
+
+    @staticmethod
+    def _column_letter(index: int) -> str:
+        result = ""
+        current = index
+        while current > 0:
+            current, remainder = divmod(current - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
+
+    def _format_source_amount(self, amount: Decimal | str | None, currency: str | None) -> str:
+        if amount in (None, ""):
+            return ""
+        try:
+            value = Decimal(str(amount))
+        except InvalidOperation:
+            return str(amount)
+
+        code = (currency or "").strip().upper()
+        if code in {"KRW", "TWD"}:
+            rounded = value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            formatted = f"{rounded:,.0f}"
+        else:
+            rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            formatted = f"{rounded:,.2f}"
+
+        if code == "KRW":
+            return f"₩{formatted}"
+        if code == "TWD":
+            return f"NT${formatted}"
+        if code == "USD":
+            return f"US${formatted}"
+        return formatted
 
     def refresh_category_analysis(self) -> None:
         records = self.expenses_ws.get_all_records()
@@ -443,7 +487,12 @@ class GoogleSheetsService:
             chart_blocks.append((registrant, start_row, current_row - 1))
 
         self.analysis_ws.clear()
-        self.analysis_ws.update("A1", rows)
+        self.analysis_ws.update("A1", rows, value_input_option="USER_ENTERED")
+        analysis_col = self._column_letter(3)
+        self.analysis_ws.format(
+            f"{analysis_col}2:{analysis_col}",
+            {"numberFormat": {"type": "CURRENCY", "pattern": '"NT$"#,##0'}},
+        )
         self._rebuild_analysis_charts(chart_blocks)
 
     @staticmethod

@@ -28,6 +28,7 @@ class ReceiptParser:
             '"receipt_date": "YYYY-MM-DD"|null, '
             '"merchant_name": string|null, '
             '"total_amount": number|null, '
+            '"source_region": "KR"|"TW"|null, '
             '"currency": "KRW"|"USD"|"TWD"|string, '
             '"items": [{"item_name": string, "quantity": number, "unit_price": number, "line_total": number}], '
             '"raw_text": string|null'
@@ -38,10 +39,11 @@ class ReceiptParser:
             "3) 台灣發票的 receipt_number 優先抓兩碼英文字加 8 碼數字的發票號碼。"
             "4) 韓國收據若有 승인번호、거래번호 或 영수증번호，可作為 receipt_number。"
             "5) 若沒有逐項品項，items 可為空陣列，但 total_amount 仍要盡量填出。"
-            "6) quantity 預設 1。"
-            "7) unit_price、line_total、total_amount 只保留數字，不含逗號與幣號。"
-            "8) 幣別請依內容推斷，台灣優先 TWD，韓國優先 KRW。"
-            "9) 若看不清楚填 null。"
+            "6) source_region 若為韓國填 KR，台灣填 TW，無法判斷填 null。"
+            "7) quantity 預設 1。"
+            "8) unit_price、line_total、total_amount 只保留數字，不含逗號與幣號。"
+            "9) 幣別請依內容推斷，台灣優先 TWD，韓國優先 KRW。"
+            "10) 若看不清楚填 null。"
         )
 
         response = self.client.responses.create(

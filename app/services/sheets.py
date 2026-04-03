@@ -94,7 +94,7 @@ class GoogleSheetsService:
         self.mapping_ws.append_row([user_id, display_name])
 
     def append_receipt(self, user_id: str, registrant: str, receipt: ReceiptExtraction) -> int:
-        register_date = datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
+        register_date = datetime.now(self._resolve_receipt_timezone(receipt)).strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         if not receipt.items:
             rows.append(
@@ -134,3 +134,18 @@ class GoogleSheetsService:
 
         self.expenses_ws.append_rows(rows, value_input_option="USER_ENTERED")
         return len(rows)
+
+    def _resolve_receipt_timezone(self, receipt: ReceiptExtraction) -> ZoneInfo:
+        region = (receipt.source_region or "").strip().upper()
+        if region == "KR":
+            return ZoneInfo("Asia/Seoul")
+        if region == "TW":
+            return ZoneInfo("Asia/Taipei")
+
+        currency = (receipt.currency or "").strip().upper()
+        if currency == "KRW":
+            return ZoneInfo("Asia/Seoul")
+        if currency == "TWD":
+            return ZoneInfo("Asia/Taipei")
+
+        return self.local_tz

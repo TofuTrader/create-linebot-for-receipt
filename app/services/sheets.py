@@ -54,6 +54,7 @@ EVENT_STATUS_DONE = "done"
 EVENT_STATUS_FAILED = "failed"
 EVENT_PROCESSING_STALE_MINUTES = 15
 ANALYSIS_HEADERS = ["登錄者", "交易類型", "金額台幣", "圖表標籤"]
+TOTAL_ANALYSIS_HEADERS = ["總計對象", "總金額台幣", "圖表標籤"]
 
 
 class GoogleSheetsService:
@@ -468,7 +469,7 @@ class GoogleSheetsService:
         aggregates = self._build_category_aggregates(records)
 
         rows: list[list[str]] = [ANALYSIS_HEADERS]
-        chart_blocks: list[tuple[str, int, int]] = []
+        chart_blocks: list[tuple[str, int, int, Decimal]] = []
         current_row = 2
 
         datasets: list[tuple[str, dict[str, Decimal]]] = []
@@ -481,6 +482,7 @@ class GoogleSheetsService:
             if not categories:
                 continue
             start_row = current_row
+            total_amount = self._sum_decimal_values(categories.values())
             for category, amount in sorted(categories.items(), key=lambda item: (-item[1], item[0])):
                 rows.append(
                     [
@@ -491,7 +493,21 @@ class GoogleSheetsService:
                     ]
                 )
                 current_row += 1
-            chart_blocks.append((registrant, start_row, current_row - 1))
+            chart_blocks.append((registrant, start_row, current_row - 1, total_amount))
+
+        total_rows: list[list[str]] = [TOTAL_ANALYSIS_HEADERS]
+        overall_total = self._sum_decimal_values(overall.values()) if overall else Decimal("0")
+        if overall:
+            total_rows.append(["全部", self._format_decimal(overall_total), self._format_chart_amount(overall_total)])
+        for registrant, categories in sorted(aggregates.items(), key=lambda item: item[0]):
+            registrant_total = self._sum_decimal_values(categories.values())
+            total_rows.append(
+                [
+                    registrant,
+                    self._format_decimal(registrant_total),
+                    self._format_chart_amount(registrant_total),
+                ]
+            )
 
         self.analysis_ws.clear()
         self.analysis_ws.update("A1", rows, value_input_option="USER_ENTERED")
@@ -500,7 +516,18 @@ class GoogleSheetsService:
             f"{analysis_col}2:{analysis_col}",
             {"numberFormat": {"type": "CURRENCY", "pattern": '"NT$"#,##0'}},
         )
-        self._rebuild_analysis_charts(chart_blocks)
+        self.analysis_ws.update("F1", total_rows, value_input_option="USER_ENTERED")
+        total_col = self._column_letter(7)
+        self.analysis_ws.format(
+            f"{total_col}2:{total_col}",
+            {"numberFormat": {"type": "CURRENCY", "pattern": '"NT$"#,##0'}},
+        )
+        self._rebuild_analysis_charts(
+            chart_blocks=chart_blocks,
+            person_total_start_row=3 if len(total_rows) > 2 else None,
+            person_total_end_row=len(total_rows) if len(total_rows) > 2 else None,
+            overall_total=overall_total,
+        )
 
     @staticmethod
     def _build_category_aggregates(records: list[dict[str, str]]) -> dict[str, dict[str, Decimal]]:
@@ -522,6 +549,13 @@ class GoogleSheetsService:
             for category, amount in categories.items():
                 overall[category] = overall.get(category, Decimal("0")) + amount
         return overall
+
+    @staticmethod
+    def _sum_decimal_values(values: object) -> Decimal:
+        total = Decimal("0")
+        for value in values:
+            total += value
+        return total
 
     @staticmethod
     def _parse_decimal_value(value: object) -> Decimal | None:
@@ -548,7 +582,14 @@ class GoogleSheetsService:
         except InvalidOperation:
             return None
 
-    def _rebuild_analysis_charts(self, chart_blocks: list[tuple[str, int, int]]) -> None:
+    def _rebuild_analysis_charts(
+        self,
+        *,
+        chart_blocks: list[tuple[str, int, int, Decimal]],
+        person_total_start_row: int | None,
+        person_total_end_row: int | None,
+        overall_total: Decimal,
+    ) -> None:
         fetch_metadata = getattr(self.sheet, "fetch_sheet_metadata", None)
         if not callable(fetch_metadata):
             logger.warning("gspread fetch_sheet_metadata is unavailable; skipping chart rebuild")
@@ -568,13 +609,14 @@ class GoogleSheetsService:
                 if chart_id is not None:
                     requests.append({"deleteEmbeddedObject": {"objectId": chart_id}})
 
-        for index, (registrant, start_row, end_row) in enumerate(chart_blocks):
+        for index, (registrant, start_row, end_row, total_amount) in enumerate(chart_blocks):
             requests.append(
                 {
                     "addChart": {
                         "chart": {
                             "spec": {
                                 "title": f"{registrant} 交易類型金額占比",
+                                "subtitle": f"總計 {self._format_chart_amount(total_amount)}",
                                 "pieChart": {
                                     "legendPosition": "LABELED_LEGEND",
                                     "domain": {
@@ -614,6 +656,75 @@ class GoogleSheetsService:
                                     },
                                     "widthPixels": 640,
                                     "heightPixels": 360,
+                                }
+                            },
+                        }
+                    }
+                }
+            )
+
+        if person_total_start_row is not None and person_total_end_row is not None:
+            requests.append(
+                {
+                    "addChart": {
+                        "chart": {
+                            "spec": {
+                                "title": "各登錄者總消費比較",
+                                "subtitle": f"全部總計 {self._format_chart_amount(overall_total)}",
+                                "basicChart": {
+                                    "chartType": "BAR",
+                                    "legendPosition": "NO_LEGEND",
+                                    "headerCount": 0,
+                                    "axis": [
+                                        {"position": "BOTTOM_AXIS", "title": "金額台幣"},
+                                        {"position": "LEFT_AXIS", "title": "登錄者"},
+                                    ],
+                                    "domains": [
+                                        {
+                                            "domain": {
+                                                "sourceRange": {
+                                                    "sources": [
+                                                        {
+                                                            "sheetId": self.analysis_ws.id,
+                                                            "startRowIndex": person_total_start_row - 1,
+                                                            "endRowIndex": person_total_end_row,
+                                                            "startColumnIndex": 5,
+                                                            "endColumnIndex": 6,
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "series": [
+                                        {
+                                            "series": {
+                                                "sourceRange": {
+                                                    "sources": [
+                                                        {
+                                                            "sheetId": self.analysis_ws.id,
+                                                            "startRowIndex": person_total_start_row - 1,
+                                                            "endRowIndex": person_total_end_row,
+                                                            "startColumnIndex": 6,
+                                                            "endColumnIndex": 7,
+                                                        }
+                                                    ]
+                                                }
+                                            },
+                                            "targetAxis": "BOTTOM_AXIS",
+                                        }
+                                    ],
+                                },
+                            },
+                            "position": {
+                                "overlayPosition": {
+                                    "anchorCell": {
+                                        "sheetId": self.analysis_ws.id,
+                                        "rowIndex": max(len(chart_blocks), 1) * 18,
+                                        "columnIndex": 4,
+                                    },
+                                    "widthPixels": 700,
+                                    "heightPixels": 420,
                                 }
                             },
                         }

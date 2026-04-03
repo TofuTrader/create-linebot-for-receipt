@@ -52,7 +52,8 @@ async def callback(
         if _is_supported_image_event(event):
             user_id = str(event["source"]["userId"])
             message_id = str(event["message"]["id"])
-            background_tasks.add_task(_process_receipt_event_async, user_id, message_id)
+            event_id = str(event.get("webhookEventId") or f"message:{message_id}")
+            background_tasks.add_task(_process_receipt_event_async, user_id, message_id, event_id)
 
     return "OK"
 
@@ -63,11 +64,21 @@ def manual_register_user(user_id: str, name: str):
     return {"ok": True, "user_id": user_id, "name": name}
 
 
-async def _process_receipt_event_async(user_id: str, message_id: str) -> None:
-    await asyncio.to_thread(_process_receipt_event, user_id, message_id)
+async def _process_receipt_event_async(user_id: str, message_id: str, event_id: str) -> None:
+    await asyncio.to_thread(_process_receipt_event, user_id, message_id, event_id)
 
 
-def _process_receipt_event(user_id: str, message_id: str) -> None:
+def _process_receipt_event(user_id: str, message_id: str, event_id: str) -> None:
+    sheets = _get_sheets_service()
+    if not sheets.begin_event_processing(event_id=event_id, message_id=message_id, user_id=user_id):
+        logger.info(
+            "Skipping duplicate or in-flight receipt event. event_id=%s message_id=%s user_id=%s",
+            event_id,
+            message_id,
+            user_id,
+        )
+        return
+
     try:
         _show_loading_indicator(user_id, loading_seconds=10)
 
@@ -75,13 +86,15 @@ def _process_receipt_event(user_id: str, message_id: str) -> None:
         receipt = _get_receipt_parser().parse_receipt(image_bytes, mime_type=mime_type)
 
         display_name = _get_line_display_name(user_id)
-        sheets = _get_sheets_service()
         sheets.upsert_user_mapping(user_id, display_name)
         inserted_rows = sheets.append_receipt(
             user_id=user_id,
             registrant=display_name,
             receipt=receipt,
+            event_id=event_id,
+            message_id=message_id,
         )
+        sheets.mark_event_processed(event_id=event_id, message_id=message_id, inserted_rows=inserted_rows)
 
         summary_lines = [
             "✅ 已完成登錄",
@@ -93,6 +106,11 @@ def _process_receipt_event(user_id: str, message_id: str) -> None:
         _push_text_message(user_id, "\n".join(summary_lines))
     except Exception:
         logger.exception("Failed to process receipt image for user_id=%s", user_id)
+        sheets.mark_event_failed(
+            event_id=event_id,
+            message_id=message_id,
+            error_message="receipt_processing_failed",
+        )
         _push_text_message(
             user_id,
             "這張收據暫時無法完成辨識或寫入 Google Sheets，請確認圖片清晰度與環境設定後再試一次。",

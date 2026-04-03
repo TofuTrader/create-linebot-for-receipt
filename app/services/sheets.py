@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -24,9 +24,25 @@ EXPENSE_HEADERS = [
     "複價",
     "總計",
     "幣別",
+    "LINE事件ID",
+    "LINE訊息ID",
 ]
 
 MAPPING_HEADERS = ["登錄者ID", "登錄者"]
+EVENT_HEADERS = [
+    "LINE事件ID",
+    "LINE訊息ID",
+    "使用者ID",
+    "狀態",
+    "首次接收時間",
+    "最後更新時間",
+    "寫入列數",
+    "錯誤訊息",
+]
+EVENT_STATUS_PROCESSING = "processing"
+EVENT_STATUS_DONE = "done"
+EVENT_STATUS_FAILED = "failed"
+EVENT_PROCESSING_STALE_MINUTES = 15
 
 
 class GoogleSheetsService:
@@ -45,6 +61,7 @@ class GoogleSheetsService:
         self.sheet = gc.open_by_key(spreadsheet_id)
         self.expenses_ws = self._ensure_worksheet("expenses", EXPENSE_HEADERS)
         self.mapping_ws = self._ensure_worksheet("user_mapping", MAPPING_HEADERS)
+        self.events_ws = self._ensure_worksheet("processed_events", EVENT_HEADERS)
 
     @staticmethod
     def _load_credentials() -> Credentials:
@@ -93,7 +110,94 @@ class GoogleSheetsService:
                 return
         self.mapping_ws.append_row([user_id, display_name])
 
-    def append_receipt(self, user_id: str, registrant: str, receipt: ReceiptExtraction) -> int:
+    def begin_event_processing(self, event_id: str, message_id: str, user_id: str) -> bool:
+        existing_rows = self.events_ws.get_all_values()
+        row_index = self._find_event_row_index(existing_rows, event_id)
+        now_str = self._now_str()
+
+        existing_written_rows = self._count_expense_rows_by_message_id(message_id)
+        if existing_written_rows > 0:
+            self._upsert_event_row(
+                existing_rows=existing_rows,
+                row_index=row_index,
+                event_id=event_id,
+                message_id=message_id,
+                user_id=user_id,
+                status=EVENT_STATUS_DONE,
+                inserted_rows=existing_written_rows,
+                error_message="",
+                now_str=now_str,
+            )
+            return False
+
+        if row_index is None:
+            self.events_ws.append_row(
+                [event_id, message_id, user_id, EVENT_STATUS_PROCESSING, now_str, now_str, "", ""]
+            )
+            return True
+
+        row = existing_rows[row_index - 1]
+        status = row[3].strip().lower() if len(row) > 3 else ""
+        last_updated = row[5].strip() if len(row) > 5 else ""
+
+        if status == EVENT_STATUS_DONE:
+            return False
+
+        if status == EVENT_STATUS_PROCESSING and not self._is_processing_stale(last_updated):
+            return False
+
+        self._upsert_event_row(
+            existing_rows=existing_rows,
+            row_index=row_index,
+            event_id=event_id,
+            message_id=message_id,
+            user_id=user_id,
+            status=EVENT_STATUS_PROCESSING,
+            inserted_rows="",
+            error_message="",
+            now_str=now_str,
+        )
+        return True
+
+    def mark_event_processed(self, event_id: str, message_id: str, inserted_rows: int) -> None:
+        existing_rows = self.events_ws.get_all_values()
+        row_index = self._find_event_row_index(existing_rows, event_id)
+        self._upsert_event_row(
+            existing_rows=existing_rows,
+            row_index=row_index,
+            event_id=event_id,
+            message_id=message_id,
+            user_id="",
+            status=EVENT_STATUS_DONE,
+            inserted_rows=inserted_rows,
+            error_message="",
+            now_str=self._now_str(),
+        )
+
+    def mark_event_failed(self, event_id: str, message_id: str, error_message: str) -> None:
+        existing_rows = self.events_ws.get_all_values()
+        row_index = self._find_event_row_index(existing_rows, event_id)
+        self._upsert_event_row(
+            existing_rows=existing_rows,
+            row_index=row_index,
+            event_id=event_id,
+            message_id=message_id,
+            user_id="",
+            status=EVENT_STATUS_FAILED,
+            inserted_rows="",
+            error_message=error_message,
+            now_str=self._now_str(),
+        )
+
+    def append_receipt(
+        self,
+        user_id: str,
+        registrant: str,
+        receipt: ReceiptExtraction,
+        *,
+        event_id: str,
+        message_id: str,
+    ) -> int:
         register_date = datetime.now(self._resolve_receipt_timezone(receipt)).strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         if not receipt.items:
@@ -111,6 +215,8 @@ class GoogleSheetsService:
                     "",
                     "" if receipt.total_amount is None else str(receipt.total_amount),
                     receipt.currency,
+                    event_id,
+                    message_id,
                 ]
             )
         else:
@@ -129,6 +235,8 @@ class GoogleSheetsService:
                         str(item.line_total),
                         "" if receipt.total_amount is None else str(receipt.total_amount),
                         receipt.currency,
+                        event_id,
+                        message_id,
                     ]
                 )
 
@@ -149,3 +257,64 @@ class GoogleSheetsService:
             return ZoneInfo("Asia/Taipei")
 
         return self.local_tz
+
+    def _now_str(self) -> str:
+        return datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _find_event_row_index(rows: list[list[str]], event_id: str) -> int | None:
+        for idx, row in enumerate(rows[1:], start=2):
+            if len(row) > 0 and row[0] == event_id:
+                return idx
+        return None
+
+    def _upsert_event_row(
+        self,
+        *,
+        existing_rows: list[list[str]],
+        row_index: int | None,
+        event_id: str,
+        message_id: str,
+        user_id: str,
+        status: str,
+        inserted_rows: int | str,
+        error_message: str,
+        now_str: str,
+    ) -> None:
+        first_seen = now_str
+        existing_user_id = user_id
+        if row_index is not None:
+            existing_row = existing_rows[row_index - 1]
+            if len(existing_row) > 2 and existing_row[2].strip():
+                existing_user_id = existing_row[2].strip()
+            if len(existing_row) > 4 and existing_row[4].strip():
+                first_seen = existing_row[4].strip()
+
+        payload = [
+            event_id,
+            message_id,
+            existing_user_id,
+            status,
+            first_seen,
+            now_str,
+            str(inserted_rows) if inserted_rows != "" else "",
+            error_message,
+        ]
+
+        if row_index is None:
+            self.events_ws.append_row(payload)
+        else:
+            self.events_ws.update(f"A{row_index}:H{row_index}", [payload])
+
+    def _count_expense_rows_by_message_id(self, message_id: str) -> int:
+        message_col = self.expenses_ws.col_values(len(EXPENSE_HEADERS))
+        return sum(1 for value in message_col[1:] if value == message_id)
+
+    def _is_processing_stale(self, last_updated: str) -> bool:
+        if not last_updated:
+            return True
+        try:
+            updated_at = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=self.local_tz)
+        except ValueError:
+            return True
+        return datetime.now(self.local_tz) - updated_at > timedelta(minutes=EVENT_PROCESSING_STALE_MINUTES)

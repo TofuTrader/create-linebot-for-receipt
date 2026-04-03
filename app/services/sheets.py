@@ -455,12 +455,6 @@ class GoogleSheetsService:
             rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             formatted = f"{rounded:,.2f}"
 
-        if code == "KRW":
-            return f"₩{formatted}"
-        if code == "TWD":
-            return f"NT${formatted}"
-        if code == "USD":
-            return f"US${formatted}"
         return formatted
 
     def refresh_category_analysis(self) -> None:

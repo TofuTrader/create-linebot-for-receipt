@@ -9,6 +9,12 @@ services:
     envVars:
       - key: APP_TIMEZONE
         value: Asia/Taipei
+      - key: FX_RATE_TWD_TO_TWD
+        value: "1"
+      - key: FX_RATE_KRW_TO_TWD
+        value: "0.024"
+      - key: FX_RATE_USD_TO_TWD
+        value: "32"
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         value: /etc/secrets/google-service-account.json
       - key: LINE_CHANNEL_SECRET

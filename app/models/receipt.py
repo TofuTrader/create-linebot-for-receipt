@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class ReceiptItem(BaseModel):
     item_name: str = Field(..., description="品項名稱")
     item_name_zh: str | None = Field(default=None, description="品項中文翻譯")
+    transaction_category: str | None = Field(default=None, description="交易類型")
     quantity: Decimal = Field(default=Decimal("1"), description="數量")
     unit_price: Decimal = Field(default=Decimal("0"), description="單價")
     line_total: Decimal = Field(default=Decimal("0"), description="複價")
@@ -17,6 +18,7 @@ class ReceiptExtraction(BaseModel):
     receipt_date: str | None = Field(default=None, description="YYYY-MM-DD")
     merchant_name: str | None = Field(default=None, description="店家")
     merchant_name_zh: str | None = Field(default=None, description="店家中文翻譯")
+    transaction_category: str | None = Field(default=None, description="交易類型")
     total_amount: Decimal | None = Field(default=None, description="總計")
     source_region: str | None = Field(default=None, description="票據地區，例：KR、TW")
     currency: str = Field(default="KRW", description="幣別")

@@ -150,11 +150,9 @@ def _format_merchant_summary(source_region: Any, merchant_name: Any, merchant_na
     translated = str(merchant_name_zh or "").strip()
     if str(source_region or "").strip().upper() != "KR":
         return original or translated
-    if not original:
-        return translated
-    if not translated or translated == original:
-        return original
-    return f"{original}({translated})"
+    if translated and original and translated != original:
+        return f"{translated}({original})"
+    return translated or original
 
 
 def _missing_required_settings() -> list[str]:

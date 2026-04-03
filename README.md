@@ -16,17 +16,20 @@
 
 ## Google Sheet 結構
 
-程式會自動建立或修正兩個工作表：
+程式會自動建立或修正四個工作表：
 
 - `expenses`
-  - 欄位：`登錄日期, 登錄者, 登錄者ID, 憑證編號, 日期, 店家, 品項, 數量, 單價, 複價, 總計, 幣別, 退稅狀態, 退稅金額, 退稅說明, LINE事件ID, LINE訊息ID`
+  - 欄位：`登錄日期, 登錄者, 登錄者ID, 憑證編號, 日期, 店家, 品項, 交易類型, 數量, 單價, 複價, 複價(台幣), 總計, 幣別, 退稅狀態, 退稅金額, 退稅說明, LINE事件ID, LINE訊息ID`
 - `user_mapping`
   - 欄位：`登錄者ID, 登錄者`
 - `processed_events`
   - 欄位：`LINE事件ID, LINE訊息ID, 使用者ID, 狀態, 首次接收時間, 最後更新時間, 寫入列數, 錯誤訊息`
+- `category_analysis`
+  - 欄位：`登錄者, 交易類型, 金額台幣`
+  - 會自動建立各登錄者與整體的交易類型金額圓餅圖
 
 同一張收據若有多個品項，會寫入多列；`總計` 會重複出現在該張收據的每一列。
-韓國收據的 `店家` 與 `品項` 會保留韓文原文，並在後面以括號附上繁體中文翻譯。
+韓國收據的 `店家` 與 `品項` 會顯示為 `中文翻譯(韓文原文)`。
 
 `登錄日期` 會依票據地區自動決定時區：
 
@@ -47,6 +50,9 @@ GOOGLE_SHEET_ID=
 GOOGLE_SERVICE_ACCOUNT_JSON=/etc/secrets/google-service-account.json
 GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT=
 APP_TIMEZONE=Asia/Taipei
+FX_RATE_TWD_TO_TWD=1
+FX_RATE_KRW_TO_TWD=0.024
+FX_RATE_USD_TO_TWD=32
 ```
 
 `GOOGLE_SERVICE_ACCOUNT_JSON` 可填：
@@ -55,6 +61,7 @@ APP_TIMEZONE=Asia/Taipei
 - 直接貼完整 JSON 字串
 
 `GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT` 可直接放 JSON 內容，若同時設定，會優先使用它。
+`FX_RATE_*` 用來把明細複價換算成台幣，並提供 `category_analysis` 工作表統計與圖表使用。
 
 ## 本機啟動
 
@@ -126,6 +133,9 @@ Render 上需要設定的值：
 - `OPENAI_MODEL`
 - `GOOGLE_SHEET_ID`
 - `APP_TIMEZONE`
+- `FX_RATE_TWD_TO_TWD`
+- `FX_RATE_KRW_TO_TWD`
+- `FX_RATE_USD_TO_TWD`
 
 Google 憑證有兩種做法：
 
@@ -143,8 +153,9 @@ Google 憑證有兩種做法：
 3. 背景程序抓取圖片、呼叫 OpenAI 做辨識。
 4. 系統先用 `webhookEventId` 與 `message.id` 做去重，避免 redelivery 重複入帳。
 5. 系統更新 `user_mapping` 工作表中的使用者名稱。
-6. 系統把辨識結果逐列寫入 `expenses`。
-7. Bot 再主動 push 一則摘要訊息給使用者。
+6. 系統把辨識結果逐列寫入 `expenses`，包含 `交易類型` 與 `複價(台幣)`。
+7. 系統自動重算 `category_analysis` 工作表與圓餅圖。
+8. Bot 再主動 push 一則摘要訊息給使用者。
 
 ## 補充 API
 
@@ -168,7 +179,9 @@ GET /health
 - 台灣發票號碼會優先抓像 `AB12345678` 這類格式。
 - 韓國收據若有 승인번호、거래번호、영수증번호，會盡量作為憑證編號。
 - 登錄時間會依辨識出的 `source_region` 或 `currency` 自動切換為韓國或台灣時區。
-- 韓國收據會將店家與品項顯示為 `原文(中文翻譯)`。
+- 韓國收據會將店家與品項顯示為 `中文翻譯(原文)`。
+- 每列明細會自動分類成 `餐飲、服飾、交通、住宿、美妝保養、藥妝醫療、超市便利商店、家居雜貨、電子產品、伴手禮禮品、娛樂、服務、其他` 其中之一。
+- `category_analysis` 圖表統計使用 `複價(台幣)`；若收據沒有逐項明細，會用整筆總計換算台幣後做分類統計。
 - 韓國退稅欄位為估計值，主要依收據內容、退稅標記與金額門檻判斷；旅客身分、停留時間與實際是否為退稅店，仍需人工確認。
 - 已加入 LINE webhook redelivery 去重機制，會同時記錄 `LINE事件ID`、`LINE訊息ID` 與 `processed_events` 工作表。
 - 若收據上沒有逐項品項，`items` 可能為空，但仍會盡量保留總計。

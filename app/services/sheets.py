@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -11,6 +13,8 @@ from google.oauth2.service_account import Credentials
 
 from app.models.receipt import ReceiptExtraction
 
+logger = logging.getLogger(__name__)
+
 EXPENSE_HEADERS = [
     "登錄日期",
     "登錄者",
@@ -19,9 +23,11 @@ EXPENSE_HEADERS = [
     "日期",
     "店家",
     "品項",
+    "交易類型",
     "數量",
     "單價",
     "複價",
+    "複價(台幣)",
     "總計",
     "幣別",
     "退稅狀態",
@@ -46,6 +52,7 @@ EVENT_STATUS_PROCESSING = "processing"
 EVENT_STATUS_DONE = "done"
 EVENT_STATUS_FAILED = "failed"
 EVENT_PROCESSING_STALE_MINUTES = 15
+ANALYSIS_HEADERS = ["登錄者", "交易類型", "金額台幣"]
 
 
 class GoogleSheetsService:
@@ -59,12 +66,14 @@ class GoogleSheetsService:
         except ZoneInfoNotFoundError:
             self.local_tz = ZoneInfo("UTC")
 
+        self.fx_rates = self._load_fx_rates()
         credentials = self._load_credentials()
         gc = gspread.authorize(credentials)
         self.sheet = gc.open_by_key(spreadsheet_id)
         self.expenses_ws = self._ensure_worksheet("expenses", EXPENSE_HEADERS)
         self.mapping_ws = self._ensure_worksheet("user_mapping", MAPPING_HEADERS)
         self.events_ws = self._ensure_worksheet("processed_events", EVENT_HEADERS)
+        self.analysis_ws = self._ensure_worksheet("category_analysis", ANALYSIS_HEADERS)
 
     @staticmethod
     def _load_credentials() -> Credentials:
@@ -86,6 +95,22 @@ class GoogleSheetsService:
             return Credentials.from_service_account_info(json.loads(raw_value), scopes=scopes)
 
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是檔案路徑或 JSON 內容")
+
+    @staticmethod
+    def _load_fx_rates() -> dict[str, Decimal]:
+        return {
+            "TWD": GoogleSheetsService._read_decimal_env("FX_RATE_TWD_TO_TWD", "1"),
+            "KRW": GoogleSheetsService._read_decimal_env("FX_RATE_KRW_TO_TWD", "0.024"),
+            "USD": GoogleSheetsService._read_decimal_env("FX_RATE_USD_TO_TWD", "32"),
+        }
+
+    @staticmethod
+    def _read_decimal_env(key: str, default: str) -> Decimal:
+        raw = os.getenv(key, default).strip()
+        try:
+            return Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError(f"{key} 不是有效的數字") from exc
 
     def _ensure_worksheet(self, title: str, headers: list[str]):
         try:
@@ -207,11 +232,13 @@ class GoogleSheetsService:
             original=receipt.merchant_name,
             translated=receipt.merchant_name_zh,
         )
+        receipt_category = (receipt.transaction_category or "其他").strip() or "其他"
         tax_refund_status = self._format_tax_refund_status(receipt.tax_refund_status)
         tax_refund_amount = "" if receipt.tax_refund_amount is None else str(receipt.tax_refund_amount)
         tax_refund_note = receipt.tax_refund_note or ""
         rows = []
         if not receipt.items:
+            line_total_twd = self._convert_amount_to_twd(receipt.total_amount, receipt.currency)
             rows.append(
                 [
                     register_date,
@@ -221,9 +248,11 @@ class GoogleSheetsService:
                     receipt.receipt_date or "",
                     merchant_display,
                     "",
+                    receipt_category,
                     "",
                     "",
                     "",
+                    "" if line_total_twd is None else self._format_decimal(line_total_twd),
                     "" if receipt.total_amount is None else str(receipt.total_amount),
                     receipt.currency,
                     tax_refund_status,
@@ -240,6 +269,8 @@ class GoogleSheetsService:
                     original=item.item_name,
                     translated=item.item_name_zh,
                 )
+                item_category = (item.transaction_category or receipt_category).strip() or "其他"
+                line_total_twd = self._convert_amount_to_twd(item.line_total, receipt.currency)
                 rows.append(
                     [
                         register_date,
@@ -249,9 +280,11 @@ class GoogleSheetsService:
                         receipt.receipt_date or "",
                         merchant_display,
                         item_display,
+                        item_category,
                         str(item.quantity),
                         str(item.unit_price),
                         str(item.line_total),
+                        "" if line_total_twd is None else self._format_decimal(line_total_twd),
                         "" if receipt.total_amount is None else str(receipt.total_amount),
                         receipt.currency,
                         tax_refund_status,
@@ -263,6 +296,10 @@ class GoogleSheetsService:
                 )
 
         self.expenses_ws.append_rows(rows, value_input_option="USER_ENTERED")
+        try:
+            self.refresh_category_analysis()
+        except Exception:
+            logger.exception("Failed to refresh category analysis sheet")
         return len(rows)
 
     def _resolve_receipt_timezone(self, receipt: ReceiptExtraction) -> ZoneInfo:
@@ -348,11 +385,11 @@ class GoogleSheetsService:
 
         if (source_region or "").strip().upper() != "KR":
             return original_text or translated_text
-        if not original_text:
+        if translated_text and original_text and translated_text != original_text:
+            return f"{translated_text}({original_text})"
+        if translated_text:
             return translated_text
-        if not translated_text or translated_text == original_text:
-            return original_text
-        return f"{original_text}({translated_text})"
+        return original_text
 
     @staticmethod
     def _format_tax_refund_status(status: str | None) -> str:
@@ -364,3 +401,148 @@ class GoogleSheetsService:
         if normalized == "unknown":
             return "無法判定"
         return ""
+
+    def _convert_amount_to_twd(self, amount: Decimal | str | None, currency: str | None) -> Decimal | None:
+        if amount in (None, ""):
+            return None
+        try:
+            amount_decimal = Decimal(str(amount))
+        except InvalidOperation:
+            return None
+
+        rate = self.fx_rates.get((currency or "").strip().upper())
+        if rate is None:
+            return None
+        return (amount_decimal * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    @staticmethod
+    def _format_decimal(value: Decimal) -> str:
+        return format(value, "f")
+
+    def refresh_category_analysis(self) -> None:
+        records = self.expenses_ws.get_all_records()
+        aggregates = self._build_category_aggregates(records)
+
+        rows: list[list[str]] = [ANALYSIS_HEADERS]
+        chart_blocks: list[tuple[str, int, int]] = []
+        current_row = 2
+
+        datasets: list[tuple[str, dict[str, Decimal]]] = []
+        overall = self._aggregate_overall(aggregates)
+        if overall:
+            datasets.append(("全部", overall))
+        datasets.extend(sorted(aggregates.items(), key=lambda item: item[0]))
+
+        for registrant, categories in datasets:
+            if not categories:
+                continue
+            start_row = current_row
+            for category, amount in sorted(categories.items(), key=lambda item: (-item[1], item[0])):
+                rows.append([registrant, category, self._format_decimal(amount)])
+                current_row += 1
+            chart_blocks.append((registrant, start_row, current_row - 1))
+
+        self.analysis_ws.clear()
+        self.analysis_ws.update("A1", rows)
+        self._rebuild_analysis_charts(chart_blocks)
+
+    @staticmethod
+    def _build_category_aggregates(records: list[dict[str, str]]) -> dict[str, dict[str, Decimal]]:
+        aggregates: dict[str, dict[str, Decimal]] = {}
+        for record in records:
+            registrant = str(record.get("登錄者", "")).strip()
+            category = str(record.get("交易類型", "")).strip() or "其他"
+            amount_text = str(record.get("複價(台幣)", "")).strip()
+            if not registrant or not amount_text:
+                continue
+            try:
+                amount = Decimal(amount_text)
+            except InvalidOperation:
+                continue
+            registrant_bucket = aggregates.setdefault(registrant, {})
+            registrant_bucket[category] = registrant_bucket.get(category, Decimal("0")) + amount
+        return aggregates
+
+    @staticmethod
+    def _aggregate_overall(aggregates: dict[str, dict[str, Decimal]]) -> dict[str, Decimal]:
+        overall: dict[str, Decimal] = {}
+        for categories in aggregates.values():
+            for category, amount in categories.items():
+                overall[category] = overall.get(category, Decimal("0")) + amount
+        return overall
+
+    def _rebuild_analysis_charts(self, chart_blocks: list[tuple[str, int, int]]) -> None:
+        fetch_metadata = getattr(self.sheet, "fetch_sheet_metadata", None)
+        if not callable(fetch_metadata):
+            logger.warning("gspread fetch_sheet_metadata is unavailable; skipping chart rebuild")
+            return
+
+        metadata = fetch_metadata()
+        analysis_meta = None
+        for sheet_meta in metadata.get("sheets", []):
+            if sheet_meta.get("properties", {}).get("sheetId") == self.analysis_ws.id:
+                analysis_meta = sheet_meta
+                break
+
+        requests: list[dict[str, object]] = []
+        if analysis_meta:
+            for chart in analysis_meta.get("charts", []):
+                chart_id = chart.get("chartId")
+                if chart_id is not None:
+                    requests.append({"deleteEmbeddedObject": {"objectId": chart_id}})
+
+        for index, (registrant, start_row, end_row) in enumerate(chart_blocks):
+            requests.append(
+                {
+                    "addChart": {
+                        "chart": {
+                            "spec": {
+                                "title": f"{registrant} 交易類型金額占比",
+                                "pieChart": {
+                                    "legendPosition": "RIGHT_LEGEND",
+                                    "domain": {
+                                        "sourceRange": {
+                                            "sources": [
+                                                {
+                                                    "sheetId": self.analysis_ws.id,
+                                                    "startRowIndex": start_row - 1,
+                                                    "endRowIndex": end_row,
+                                                    "startColumnIndex": 1,
+                                                    "endColumnIndex": 2,
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "series": {
+                                        "sourceRange": {
+                                            "sources": [
+                                                {
+                                                    "sheetId": self.analysis_ws.id,
+                                                    "startRowIndex": start_row - 1,
+                                                    "endRowIndex": end_row,
+                                                    "startColumnIndex": 2,
+                                                    "endColumnIndex": 3,
+                                                }
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            "position": {
+                                "overlayPosition": {
+                                    "anchorCell": {
+                                        "sheetId": self.analysis_ws.id,
+                                        "rowIndex": index * 18,
+                                        "columnIndex": 4,
+                                    },
+                                    "widthPixels": 640,
+                                    "heightPixels": 360,
+                                }
+                            },
+                        }
+                    }
+                }
+            )
+
+        if requests:
+            self.sheet.batch_update({"requests": requests})

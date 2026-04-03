@@ -24,6 +24,9 @@ EXPENSE_HEADERS = [
     "複價",
     "總計",
     "幣別",
+    "退稅狀態",
+    "退稅金額",
+    "退稅說明",
     "LINE事件ID",
     "LINE訊息ID",
 ]
@@ -199,6 +202,14 @@ class GoogleSheetsService:
         message_id: str,
     ) -> int:
         register_date = datetime.now(self._resolve_receipt_timezone(receipt)).strftime("%Y-%m-%d %H:%M:%S")
+        merchant_display = self._format_korean_translation(
+            source_region=receipt.source_region,
+            original=receipt.merchant_name,
+            translated=receipt.merchant_name_zh,
+        )
+        tax_refund_status = self._format_tax_refund_status(receipt.tax_refund_status)
+        tax_refund_amount = "" if receipt.tax_refund_amount is None else str(receipt.tax_refund_amount)
+        tax_refund_note = receipt.tax_refund_note or ""
         rows = []
         if not receipt.items:
             rows.append(
@@ -208,19 +219,27 @@ class GoogleSheetsService:
                     user_id,
                     receipt.receipt_number or "",
                     receipt.receipt_date or "",
-                    receipt.merchant_name or "",
+                    merchant_display,
                     "",
                     "",
                     "",
                     "",
                     "" if receipt.total_amount is None else str(receipt.total_amount),
                     receipt.currency,
+                    tax_refund_status,
+                    tax_refund_amount,
+                    tax_refund_note,
                     event_id,
                     message_id,
                 ]
             )
         else:
             for item in receipt.items:
+                item_display = self._format_korean_translation(
+                    source_region=receipt.source_region,
+                    original=item.item_name,
+                    translated=item.item_name_zh,
+                )
                 rows.append(
                     [
                         register_date,
@@ -228,13 +247,16 @@ class GoogleSheetsService:
                         user_id,
                         receipt.receipt_number or "",
                         receipt.receipt_date or "",
-                        receipt.merchant_name or "",
-                        item.item_name,
+                        merchant_display,
+                        item_display,
                         str(item.quantity),
                         str(item.unit_price),
                         str(item.line_total),
                         "" if receipt.total_amount is None else str(receipt.total_amount),
                         receipt.currency,
+                        tax_refund_status,
+                        tax_refund_amount,
+                        tax_refund_note,
                         event_id,
                         message_id,
                     ]
@@ -318,3 +340,27 @@ class GoogleSheetsService:
         except ValueError:
             return True
         return datetime.now(self.local_tz) - updated_at > timedelta(minutes=EVENT_PROCESSING_STALE_MINUTES)
+
+    @staticmethod
+    def _format_korean_translation(source_region: str | None, original: str | None, translated: str | None) -> str:
+        original_text = (original or "").strip()
+        translated_text = (translated or "").strip()
+
+        if (source_region or "").strip().upper() != "KR":
+            return original_text or translated_text
+        if not original_text:
+            return translated_text
+        if not translated_text or translated_text == original_text:
+            return original_text
+        return f"{original_text}({translated_text})"
+
+    @staticmethod
+    def _format_tax_refund_status(status: str | None) -> str:
+        normalized = (status or "").strip().lower()
+        if normalized == "eligible":
+            return "可退稅"
+        if normalized == "not_eligible":
+            return "不可退稅"
+        if normalized == "unknown":
+            return "無法判定"
+        return ""

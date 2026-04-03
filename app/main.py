@@ -84,6 +84,11 @@ def _process_receipt_event(user_id: str, message_id: str, event_id: str) -> None
 
         image_bytes, mime_type = _get_message_image(message_id)
         receipt = _get_receipt_parser().parse_receipt(image_bytes, mime_type=mime_type)
+        merchant_summary = _format_merchant_summary(
+            source_region=receipt.source_region,
+            merchant_name=receipt.merchant_name,
+            merchant_name_zh=receipt.merchant_name_zh,
+        )
 
         display_name = _get_line_display_name(user_id)
         sheets.upsert_user_mapping(user_id, display_name)
@@ -98,11 +103,13 @@ def _process_receipt_event(user_id: str, message_id: str, event_id: str) -> None
 
         summary_lines = [
             "✅ 已完成登錄",
-            f"店家: {receipt.merchant_name or '未知'}",
+            f"店家: {merchant_summary or '未知'}",
             f"日期: {receipt.receipt_date or '未知'}",
             f"總計: {_format_total(receipt.total_amount, receipt.currency)}",
             f"寫入列數: {inserted_rows}",
         ]
+        if (receipt.source_region or "").upper() == "KR":
+            summary_lines.append(f"退稅: {_format_tax_refund_summary(receipt.tax_refund_status, receipt.tax_refund_amount)}")
         _push_text_message(user_id, "\n".join(summary_lines))
     except Exception:
         logger.exception("Failed to process receipt image for user_id=%s", user_id)
@@ -121,6 +128,33 @@ def _format_total(total_amount: Any, currency: str) -> str:
     if total_amount in (None, ""):
         return "未知"
     return f"{total_amount} {currency}".strip()
+
+
+def _format_tax_refund_summary(status: Any, amount: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "eligible":
+        if amount not in (None, ""):
+            return f"可退稅，約 {amount} KRW"
+        return "可退稅"
+    if normalized == "not_eligible":
+        return "不可退稅"
+    if normalized == "unknown":
+        if amount not in (None, ""):
+            return f"待確認，估計約 {amount} KRW"
+        return "待確認"
+    return "待確認"
+
+
+def _format_merchant_summary(source_region: Any, merchant_name: Any, merchant_name_zh: Any) -> str:
+    original = str(merchant_name or "").strip()
+    translated = str(merchant_name_zh or "").strip()
+    if str(source_region or "").strip().upper() != "KR":
+        return original or translated
+    if not original:
+        return translated
+    if not translated or translated == original:
+        return original
+    return f"{original}({translated})"
 
 
 def _missing_required_settings() -> list[str]:

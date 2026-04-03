@@ -27,10 +27,14 @@ class ReceiptParser:
             '"receipt_number": string|null, '
             '"receipt_date": "YYYY-MM-DD"|null, '
             '"merchant_name": string|null, '
+            '"merchant_name_zh": string|null, '
             '"total_amount": number|null, '
             '"source_region": "KR"|"TW"|null, '
             '"currency": "KRW"|"USD"|"TWD"|string, '
-            '"items": [{"item_name": string, "quantity": number, "unit_price": number, "line_total": number}], '
+            '"tax_refund_status": "eligible"|"not_eligible"|"unknown"|null, '
+            '"tax_refund_amount": number|null, '
+            '"tax_refund_note": string|null, '
+            '"items": [{"item_name": string, "item_name_zh": string|null, "quantity": number, "unit_price": number, "line_total": number}], '
             '"raw_text": string|null'
             "}.\n"
             "規則: "
@@ -38,12 +42,19 @@ class ReceiptParser:
             "2) 若為台灣發票的民國年日期，請轉成西元 YYYY-MM-DD。"
             "3) 台灣發票的 receipt_number 優先抓兩碼英文字加 8 碼數字的發票號碼。"
             "4) 韓國收據若有 승인번호、거래번호 或 영수증번호，可作為 receipt_number。"
-            "5) 若沒有逐項品項，items 可為空陣列，但 total_amount 仍要盡量填出。"
-            "6) source_region 若為韓國填 KR，台灣填 TW，無法判斷填 null。"
-            "7) quantity 預設 1。"
-            "8) unit_price、line_total、total_amount 只保留數字，不含逗號與幣號。"
-            "9) 幣別請依內容推斷，台灣優先 TWD，韓國優先 KRW。"
-            "10) 若看不清楚填 null。"
+            "5) 韓國收據時，merchant_name 保留韓文原文，merchant_name_zh 填繁體中文翻譯；"
+            "items 的 item_name 保留原文，item_name_zh 填繁體中文翻譯。"
+            "若不是韓國收據，中文翻譯欄位填 null。"
+            "6) 若沒有逐項品項，items 可為空陣列，但 total_amount 仍要盡量填出。"
+            "7) source_region 若為韓國填 KR，台灣填 TW，無法判斷填 null。"
+            "8) quantity 預設 1。"
+            "9) unit_price、line_total、total_amount、tax_refund_amount 只保留數字，不含逗號與幣號。"
+            "10) 幣別請依內容推斷，台灣優先 TWD，韓國優先 KRW。"
+            "11) 韓國退稅判斷僅針對商品購買收據做估計：通常需達 15,000 KRW 以上、屬可退稅商品、且來自退稅店或有退稅憑單/即時退稅資訊。"
+            "餐飲熟食與一般服務通常不可退稅。若影像無法確認是否為退稅店、是否為旅客本人可退、或是否具備退稅憑單，tax_refund_status 請填 unknown。"
+            "12) 若收據上明確顯示 TAX REFUND / TAX FREE / 사후면세 / 즉시환급 / refund amount，優先依其內容判斷與填 tax_refund_amount。"
+            "13) 若是韓國收據且可從稅額欄位合理估計退稅金額，可填估計值，並在 tax_refund_note 說明是估計。"
+            "14) 若看不清楚填 null。"
         )
 
         response = self.client.responses.create(
@@ -65,6 +76,7 @@ class ReceiptParser:
 
         text = self._extract_text(response)
         data = self._safe_json_loads(text)
+        data = self._post_process(data)
         return ReceiptExtraction.model_validate(data)
 
     @staticmethod
@@ -87,3 +99,40 @@ class ReceiptParser:
         if start != -1 and end != -1:
             raw = raw[start : end + 1]
         return json.loads(raw)
+
+    @staticmethod
+    def _post_process(data: dict[str, Any]) -> dict[str, Any]:
+        source_region = str(data.get("source_region") or "").strip().upper()
+        currency = str(data.get("currency") or "").strip().upper()
+
+        if source_region == "KR" or currency == "KRW":
+            data["source_region"] = "KR"
+        elif source_region == "TW" or currency == "TWD":
+            data["source_region"] = "TW"
+
+        status = data.get("tax_refund_status")
+        if status is not None:
+            status = str(status).strip().lower()
+            if status not in {"eligible", "not_eligible", "unknown"}:
+                status = "unknown"
+            data["tax_refund_status"] = status
+
+        total_amount = data.get("total_amount")
+        if data.get("source_region") == "KR":
+            if not data.get("tax_refund_status"):
+                data["tax_refund_status"] = "unknown"
+            if total_amount is not None:
+                try:
+                    total_value = float(total_amount)
+                except (TypeError, ValueError):
+                    total_value = None
+            else:
+                total_value = None
+
+            note = str(data.get("tax_refund_note") or "").strip()
+            if total_value is not None and total_value < 15000:
+                data["tax_refund_status"] = "not_eligible"
+                if not note:
+                    data["tax_refund_note"] = "未達韓國退稅常見門檻 15,000 KRW"
+
+        return data

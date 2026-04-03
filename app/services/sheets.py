@@ -53,7 +53,7 @@ EVENT_STATUS_PROCESSING = "processing"
 EVENT_STATUS_DONE = "done"
 EVENT_STATUS_FAILED = "failed"
 EVENT_PROCESSING_STALE_MINUTES = 15
-ANALYSIS_HEADERS = ["登錄者", "交易類型", "金額台幣"]
+ANALYSIS_HEADERS = ["登錄者", "交易類型", "金額台幣", "圖表標籤"]
 
 
 class GoogleSheetsService:
@@ -432,6 +432,11 @@ class GoogleSheetsService:
         return format(value, "f")
 
     @staticmethod
+    def _format_chart_amount(value: Decimal) -> str:
+        rounded = value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return f"NT${rounded:,.0f}"
+
+    @staticmethod
     def _column_letter(index: int) -> str:
         result = ""
         current = index
@@ -477,7 +482,14 @@ class GoogleSheetsService:
                 continue
             start_row = current_row
             for category, amount in sorted(categories.items(), key=lambda item: (-item[1], item[0])):
-                rows.append([registrant, category, self._format_decimal(amount)])
+                rows.append(
+                    [
+                        registrant,
+                        category,
+                        self._format_decimal(amount),
+                        f"{category} {self._format_chart_amount(amount)}",
+                    ]
+                )
                 current_row += 1
             chart_blocks.append((registrant, start_row, current_row - 1))
 
@@ -564,7 +576,7 @@ class GoogleSheetsService:
                             "spec": {
                                 "title": f"{registrant} 交易類型金額占比",
                                 "pieChart": {
-                                    "legendPosition": "RIGHT_LEGEND",
+                                    "legendPosition": "LABELED_LEGEND",
                                     "domain": {
                                         "sourceRange": {
                                             "sources": [
@@ -572,8 +584,8 @@ class GoogleSheetsService:
                                                     "sheetId": self.analysis_ws.id,
                                                     "startRowIndex": start_row - 1,
                                                     "endRowIndex": end_row,
-                                                    "startColumnIndex": 1,
-                                                    "endColumnIndex": 2,
+                                                    "startColumnIndex": 3,
+                                                    "endColumnIndex": 4,
                                                 }
                                             ]
                                         }

@@ -64,6 +64,12 @@ def manual_register_user(user_id: str, name: str):
     return {"ok": True, "user_id": user_id, "name": name}
 
 
+@app.post("/refresh-analysis")
+def refresh_analysis():
+    _get_sheets_service().refresh_category_analysis()
+    return {"ok": True}
+
+
 async def _process_receipt_event_async(user_id: str, message_id: str, event_id: str) -> None:
     await asyncio.to_thread(_process_receipt_event, user_id, message_id, event_id)
 

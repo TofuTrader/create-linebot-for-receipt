@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import gspread
+from gspread.utils import ValueRenderOption
 from google.oauth2.service_account import Credentials
 
 from app.models.receipt import ReceiptExtraction
@@ -458,7 +459,7 @@ class GoogleSheetsService:
         return formatted
 
     def refresh_category_analysis(self) -> None:
-        records = self.expenses_ws.get_all_records()
+        records = self.expenses_ws.get_all_records(value_render_option=ValueRenderOption.unformatted)
         aggregates = self._build_category_aggregates(records)
 
         rows: list[list[str]] = [ANALYSIS_HEADERS]
@@ -495,12 +496,8 @@ class GoogleSheetsService:
         for record in records:
             registrant = str(record.get("登錄者", "")).strip()
             category = str(record.get("交易類型", "")).strip() or "其他"
-            amount_text = str(record.get("複價(台幣)", "")).strip()
-            if not registrant or not amount_text:
-                continue
-            try:
-                amount = Decimal(amount_text)
-            except InvalidOperation:
+            amount = GoogleSheetsService._parse_decimal_value(record.get("複價(台幣)"))
+            if not registrant or amount is None:
                 continue
             registrant_bucket = aggregates.setdefault(registrant, {})
             registrant_bucket[category] = registrant_bucket.get(category, Decimal("0")) + amount
@@ -513,6 +510,31 @@ class GoogleSheetsService:
             for category, amount in categories.items():
                 overall[category] = overall.get(category, Decimal("0")) + amount
         return overall
+
+    @staticmethod
+    def _parse_decimal_value(value: object) -> Decimal | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        cleaned = (
+            text.replace("NT$", "")
+            .replace("US$", "")
+            .replace("₩", "")
+            .replace(",", "")
+            .replace(" ", "")
+        )
+        try:
+            return Decimal(cleaned)
+        except InvalidOperation:
+            return None
 
     def _rebuild_analysis_charts(self, chart_blocks: list[tuple[str, int, int]]) -> None:
         fetch_metadata = getattr(self.sheet, "fetch_sheet_metadata", None)

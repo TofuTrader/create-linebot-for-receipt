@@ -165,6 +165,12 @@ Google 憑證有兩種做法：
 POST /manual-register/{user_id}?name=王小明
 ```
 
+手動重算分析工作表：
+
+```http
+POST /refresh-analysis
+```
+
 健康檢查：
 
 ```http
